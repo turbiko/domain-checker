@@ -14,6 +14,16 @@ app = FastAPI()
 class DomainRequest(BaseModel):
     domain: HttpUrl
 
+def get_domain_name(domain:HttpUrl)->str:
+    domain = str(domain)
+    parsed_url = urlparse(domain)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
+    domain_name = parsed_url.netloc
+    return domain_name
+
+
 
 def get_ssl_certificate_info(domain_name: str):
     context = ssl.create_default_context()
@@ -44,16 +54,11 @@ def check_domain_expiration(domain_name: str):
 @app.post("/check_domain")
 def check_domain(request: DomainRequest):
     # explicitly convert to string
-    domain = str(request.domain)
 
-    parsed_url = urlparse(domain)
-    if not parsed_url.scheme or not parsed_url.netloc:
-        raise HTTPException(status_code=400, detail="Invalid URL")
-
-    domain_name = parsed_url.netloc
+    domain_name = get_domain_name(request.domain)
 
     try:
-        response = requests.get(domain, timeout=10)
+        response = requests.get(domain_name, timeout=10)
         status_code = response.status_code
         availability = status_code == 200
     except requests.RequestException as e:
@@ -61,6 +66,8 @@ def check_domain(request: DomainRequest):
 
     issuer, cert_expiry = get_ssl_certificate_info(domain_name)
     domain_expiry = check_domain_expiration(domain_name)
+    days_until_expiry = (domain_expiry - datetime.now()).days
+    expiration_soon = days_until_expiry <= 30
 
     return {
         "domain": domain_name,
@@ -68,5 +75,44 @@ def check_domain(request: DomainRequest):
         "status_code": status_code,
         "ssl_certificate_issuer": issuer,
         "ssl_certificate_expiry": cert_expiry.strftime('%Y-%m-%d %H:%M:%S'),
-        "domain_expiration_date": domain_expiry.strftime('%Y-%m-%d %H:%M:%S')
+        "domain_expiration_date": domain_expiry.strftime('%Y-%m-%d %H:%M:%S'),
+        "expiration_soon": expiration_soon,
+    }
+
+
+@app.post("/fast_page_check")
+def fast_page_check(request: DomainRequest):
+    domain = str(request.domain)
+    try:
+        response = requests.get(domain, timeout=10)
+        status_code = response.status_code
+        availability = status_code == 200
+        return {"domain": domain, "availability": availability, "status_code": status_code}
+    except requests.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Request error: {str(e)}")
+
+
+@app.post("/ssl_certificate_info")
+def ssl_certificate_info(request: DomainRequest):
+    domain = str(request.domain)
+    domain_name = domain.split('//')[1].split('/')[0]
+    issuer, cert_expiry = get_ssl_certificate_info(domain_name)
+    return {
+        "domain": domain_name,
+        "ssl_certificate_issuer": issuer,
+        "ssl_certificate_expiry": cert_expiry.strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+
+@app.post("/domain_expiration")
+def domain_expiration(request: DomainRequest):
+    domain = str(request.domain)
+    domain_name = domain.split('//')[1].split('/')[0]
+    domain_expiry = check_domain_expiration(domain_name)
+    days_until_expiry = (domain_expiry - datetime.now()).days
+    expiration_soon = days_until_expiry <= 30
+    return {
+        "domain": domain_name,
+        "domain_expiration_date": domain_expiry.strftime('%Y-%m-%d %H:%M:%S'),
+        "expiration_soon": expiration_soon
     }
