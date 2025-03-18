@@ -1,6 +1,7 @@
 fastapi
-uvicorn[standard]
 requests
+uvicorn[standard]
+httpx[http2]
 python-dotenv
 validators
 pyOpenSSL
