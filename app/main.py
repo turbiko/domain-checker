@@ -1,3 +1,5 @@
+import asyncio
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 import requests
@@ -25,8 +27,9 @@ def get_domain_name(domain:HttpUrl)->str:
 
 
 
-def get_ssl_certificate_info(domain_name: str):
+async def get_ssl_certificate_info(domain_name: str):
     context = ssl.create_default_context()
+    loop = asyncio.get_running_loop()
     try:
         with socket.create_connection((domain_name, 443), timeout=10) as sock:
             with context.wrap_socket(sock, server_hostname=domain_name) as ssock:
@@ -39,9 +42,10 @@ def get_ssl_certificate_info(domain_name: str):
         raise HTTPException(status_code=400, detail=f"SSL Error: {str(e)}")
 
 
-def check_domain_expiration(domain_name: str):
+async def check_domain_expiration(domain_name: str):
+    loop = asyncio.get_running_loop()
     try:
-        domain_info = whois.whois(domain_name)
+        domain_info = await loop.run_in_executor(None, whois.whois, domain_name)
         expiration_date = domain_info.expiration_date
         if isinstance(expiration_date, list):
             expiration_date = expiration_date[0]
@@ -52,20 +56,20 @@ def check_domain_expiration(domain_name: str):
 
 
 @app.post("/check_domain")
-def check_domain(request: DomainRequest):
+async def check_domain(request: DomainRequest):
     # explicitly convert to string
 
-    domain_name = get_domain_name(request.domain)
+    domain_name = urlparse(str(request.domain)).netloc
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = requests.get(str(request.domain), timeout=10)
+            status_code = response.status_code
+            availability = status_code == 200
+        except requests.RequestException as e:
+            raise HTTPException(status_code=400, detail=f"Request error: {str(e)}")
 
-    try:
-        response = requests.get(domain_name, timeout=10)
-        status_code = response.status_code
-        availability = status_code == 200
-    except requests.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Request error: {str(e)}")
-
-    issuer, cert_expiry = get_ssl_certificate_info(domain_name)
-    domain_expiry = check_domain_expiration(domain_name)
+    issuer, cert_expiry = await get_ssl_certificate_info(domain_name)
+    domain_expiry = await check_domain_expiration(domain_name)
     days_until_expiry = (domain_expiry - datetime.now()).days
     expiration_soon = days_until_expiry <= 30
 
@@ -81,22 +85,26 @@ def check_domain(request: DomainRequest):
 
 
 @app.post("/fast_page_check")
-def fast_page_check(request: DomainRequest):
-    domain = str(request.domain)
-    try:
-        response = requests.get(domain, timeout=10)
-        status_code = response.status_code
-        availability = status_code == 200
-        return {"domain": domain, "availability": availability, "status_code": status_code}
-    except requests.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Request error: {str(e)}")
+async def fast_page_check(request: DomainRequest):
+    domain_url = str(request.domain)
+    domain_name = urlparse(domain_url).netloc
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            response = requests.get(domain_url, timeout=10)
+            print(f'{response=} , {domain_url=}')
+            status_code = response.status_code
+            availability = status_code == 200
+            return {"domain": domain_name, "availability": availability, "status_code": status_code}
+        except requests.RequestException as e:
+            raise HTTPException(status_code=400, detail=f"Request error: {str(e)}")
 
 
 @app.post("/ssl_certificate_info")
-def ssl_certificate_info(request: DomainRequest):
+async def ssl_certificate_info(request: DomainRequest):
     domain = str(request.domain)
     domain_name = domain.split('//')[1].split('/')[0]
-    issuer, cert_expiry = get_ssl_certificate_info(domain_name)
+    issuer, cert_expiry = await get_ssl_certificate_info(domain_name)
     return {
         "domain": domain_name,
         "ssl_certificate_issuer": issuer,
@@ -105,10 +113,10 @@ def ssl_certificate_info(request: DomainRequest):
 
 
 @app.post("/domain_expiration")
-def domain_expiration(request: DomainRequest):
+async def domain_expiration(request: DomainRequest):
     domain = str(request.domain)
     domain_name = domain.split('//')[1].split('/')[0]
-    domain_expiry = check_domain_expiration(domain_name)
+    domain_expiry = await check_domain_expiration(domain_name)
     days_until_expiry = (domain_expiry - datetime.now()).days
     expiration_soon = days_until_expiry <= 30
     return {
